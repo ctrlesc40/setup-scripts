@@ -1,0 +1,114 @@
+#!/bin/bash
+#
+###############################################################################
+# Create LVM volumes and format them
+#
+# Assumes that the hdd is formated with a single partition /dev/sda1 of type
+# *Linux LVM* that ocupies the entire hdd
+#
+
+###############################################################################
+# Edit this variables to change the size of the different logical volumes
+ROOT_SIZE=4G
+USR_SIZE=8G
+VAR_SIZE=4G
+TMP_SIZE=256M
+SWAP_SIZE=2G
+
+###############################################################################
+# Warn the user that this will destroy all data on /dev/sda1 and only 
+# continue if user types Yes
+#
+echo "WARNING: All data on /dev/hda1 will be DESTROYED!!!!"
+read -p "Do you want to continue? [Y/n]: " answer
+answer=${answer:-n}
+
+if [[ "$answer" != [Y] ]]; then
+	exit 1
+fi
+echo "Wiping all data on /dev/sda1"
+
+###############################################################################
+# Check if running as root.
+#
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo 'This script must be run with root privileges' >&2
+    exit 1
+fi
+
+###############################################################################
+# Create LVM logical volumes
+#
+# Force Physical Volume creation
+pvcreate -y /dev/sda1
+
+# Create rpi_vg volume group
+vgcreate vg01 /dev/sda1
+
+# Create the logical volumes
+lvcreate vg01 --name root --size $ROOT_SIZE
+lvcreate vg01 -y --name usr --size $USR_SIZE
+lvcreate vg01 -y --name var --size $VAR_SIZE
+lvcreate vg01 -y --name tmp --size $TMP_SIZE
+lvcreate vg01 -y --name swap --size $SWAP_SIZE
+
+# Format the volumes
+mkfs.ext4 -L rootfs /dev/mapper/vg01-root
+mkfs.ext4 -L usrfs /dev/mapper/vg01-usr
+mkfs.ext4 -L varfs /dev/mapper/vg01-var
+mkfs.ext4 -L tmpfs /dev/mapper/vg01-tmp
+
+###############################################################################
+# Copy data from the sdcard to the logical volumes
+#
+mount /dev/mapper/vg01-root /mnt
+rsync -axv / /mnt
+umount /mnt/
+e2fsck -f /dev/mapper/vg01-root
+
+mount /dev/mapper/vg01-usr /mnt
+rsync -axv /usr /mnt
+umount /mnt/
+e2fsck -f /dev/mapper/vg01-usr
+
+mount /dev/mapper/vg01-var /mnt
+rsync -axv /var /mnt
+umount /mnt/
+e2fsck -f /dev/mapper/vg01-var
+
+mount /dev/mapper/vg01-tmp /mnt
+rsync -axv /tmp /mnt
+umount /mnt/
+e2fsck -f /dev/mapper/vg01-tmp
+
+###############################################################################
+# Edit the *fstab* on the root logical volume to mount the new volumes
+#
+mount /dev/mapper/vg01-root /mnt
+
+# Change root partitiion from sdcard to the root logical volume
+sed -i -e 's/^PARTUUID=[a-z0-9]*-02/\/dev\/mapper\/vg01-root/g' /mnt/etc/fstab
+
+# Add the rest of the logical volume mount points
+cat >> /mnt/etc/fstab <<'EOF'
+/dev/mapper/vg01-usr   /usr               ext4    defaults,noatime  0       1
+/dev/mapper/vg01-var   /var               ext4    defaults,noatime  0       1
+/dev/mapper/vg01-tmp   /tmp               ext4    defaults,noatime  0       1
+/dev/mapper/vg01-swap  swap               swap    defaults          0       0
+EOF
+
+# Create the swap
+mkswap /dev/mapper/vg01-swap
+systemctl disable dphys-swapfile.service
+umount /mnt
+
+###############################################################################
+# Change cmdline.txt to boot from the logical volume root partition
+cp /boot/cmdline.txt /boot/cmdline.sd
+sed -i -e 's/root=PARTUUID=[a-z0-9]*-02/root=\/dev\/mapper\/vg01-root/g' /boot/cmdline.txt
+
+update-initramfs -u
+
+###############################################################################
+# All done reboot to start using the hdd

@@ -1,0 +1,9 @@
+#!\bin\bash
+#
+###############################################################################
+# Create HDD partitions
+#
+# This script wipes out all the partitions on the HDD and creates a single
+# partition of type *Linux LVM* that ocuppies the entire disk.
+#
+echo "TODO"

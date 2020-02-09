@@ -1,0 +1,123 @@
+#!/bin/bash
+
+###############################################################################
+# This script installs raspbian to an USB HDD.
+#
+# It assumes that the system is booted from an sdcard with the raspbian lite
+# image.
+#
+
+###############################################################################
+# Check if running as root.
+#
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo 'This script must be run with root privileges' >&2
+    exit 1
+fi
+
+###############################################################################
+# Update to the latest code if we need to.
+#
+
+#apt update && apt upgrade -y
+
+#if [ -f /var/run/reboot-required ]; then
+#    echo "A reboot is required in order to proceed with the install." >&2
+#    echo "Please reboot and re-run this script to finish the install." >&2
+#    exit 1
+#fi
+
+###############################################################################
+# Install needed software.
+#
+
+apt install -y gdisk initramfs-tools lvm2
+
+###############################################################################
+# Enable initramfs
+#
+sed -i -e 's/#INITRD=Yes/INITRD=Yes/g' /etc/default/raspberrypi-kernel
+update-initramfs -c -k $(uname -r)
+
+echo "initramfs initrd.img-$(uname -r)" >> /boot/config.txt
+
+# to keep the /boot/config.txt correct we need to change the 
+# /etc/kernel/postinst.d/initramfs-tools
+mv /etc/kernel/postinst.d/initramfs-tools ~/
+cat > /etc/kernel/postinst.d/rpi-initramfs-tools <<'EOF'
+#!/bin/bash
+
+# Environment variables are set by the calling script
+
+version="$1"
+bootopt=""
+
+command -v update-initramfs >/dev/null 2>&1 || exit 0
+
+# passing the kernel version is required
+
+if [ -z "${version}" ]; then
+    echo >&2 "W: initramfs-tools: ${DPKG_MAINTSCRIPT_PACKAGE:-kernel package} did not pass a version number"
+    exit 2
+fi
+
+# exit if kernel does not need an initramfs
+
+if [ "$INITRD" = 'No' ]; then
+    # delete initramfs entries in /boot/config.txt
+    /bin/sed -i '/^initramfs /d' /boot/config.txt
+    exit 0
+fi
+
+# there are only two kernel types: with and without postfix "-v7+" or "-v8+"
+currentversion="$(uname -r)"
+
+# get §currenttype from $currentversion
+currenttype="<no currenttype>"
+echo $currentversion | grep -Pq '^\d+\.\d+\.\d+\+$'[ $? -eq 0 ] && currenttype="+"
+echo $currentversion | grep -Pq '^\d+\.\d+\.\d+-v[78]\+$'[ $? -eq 0 ] && currenttype="${currentversion#*-}"
+
+# get $newtype from $version
+newtype="<no newtype>"
+echo $version | grep -Pq '^\d+\.\d+\.\d+\+$'[ $? -eq 0 ] && newtype="+"
+echo $version | grep -Pq '^\d+\.\d+\.\d+-v[78]\+$'[ $? -eq 0 ] && newtype="${version#*-}"
+
+# we do nothing if the new kernel is not for the same kernel type then the current
+
+if [ "$newtype" != "$currenttype" ]; then
+    exit 0
+fi
+
+# absolute file name of kernel image may be passed as a second argument;
+
+# create the initrd in the same directory
+
+if [ -n "$2" ]; then
+    bootdir=$(dirname "$2")
+    bootopt="-b ${bootdir}"
+fi
+
+# avoid running multiple times
+
+if [ -n "$DEB_MAINT_PARAMS" ]; then
+    eval set -- "$DEB_MAINT_PARAMS"
+    if [ -z "$1" ] || [ "$1" != "configure" ]; then
+        exit 0
+    fi
+fi
+
+# we're good - create initramfs.  update runs do_bootloader
+
+INITRAMFS_TOOLS_KERNEL_HOOK=1 update-initramfs -c -t -k "${version}" ${bootopt} >&2
+
+# delete initramfs entries in /boot/config.txt
+/bin/sed -i '/^initramfs /d' /boot/config.txt
+
+# insert initramfs entry in /boot/config.txt
+INITRD_ENTRY="initramfs initrd.img-${version}"
+echo >&2 $(basename "$0"): insert \'"$INITRD_ENTRY"\' into /boot/config.txt
+/bin/sed -i "1i $INITRD_ENTRY" /boot/config.txt
+EOF
+chmod 755 /etc/kernel/postinst.d/rpi-initramfs-tools
+
